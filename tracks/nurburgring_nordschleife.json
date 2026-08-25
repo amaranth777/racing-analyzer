@@ -1,0 +1,8 @@
+{
+  "track_id": "nurburgring_nordschleife",
+  "display_name": "Nürburgring Nordschleife",
+  "length_m_nominal": 20832,
+  "mapping_status": "uncalibrated",
+  "named_sections": [],
+  "notes": "Distance-to-name mapping intentionally withheld until verified against GT7 telemetry or a citable track source."
+}
