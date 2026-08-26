@@ -16,6 +16,8 @@ VM102 192.168.50.13
 
 SQLite 不直接运行在网络共享上。当前服务器本地实时写入，归档服务使用 SQLite 原生 backup 创建一致性快照后再同步到 VM102。原始 capture 不会因分析失败自动删除。
 
+RacingAnalyzer 只生成确定性的高阶证据：合法圈边界、去重结果、圈速/分段差异、控制指标、事件、轮速诊断和数据质量。它不生成最终驾驶建议；Hermes 读取这些证据后，结合历史圈、车辆/赛道和用户目标，由大模型负责归因、排序和输出训练建议。
+
 ## 开发与验证
 
 在 VM102 开发环境执行：
@@ -31,6 +33,17 @@ python -m compileall -q src tests
 开发目录：`/home/amaranth/code/original/gt7-coach`
 
 当前服务器运行目录：`/home/amaranth/services/gt7-coach`
+
+## Hermes Skill
+
+仓库内置 `skills/racing-analyzer/SKILL.md`，用于让 Hermes/大模型快速掌握 Analyzer 的调用方式、JSON 证据契约、去重语义和置信度边界。Hermes 默认只从当前 profile 的 `$HERMES_HOME/skills/` 加载 Skill，不会扫描任意项目目录；因此首次使用时显式安装到当前 profile：
+
+```bash
+python3 scripts/install-hermes-skill.py --check
+python3 scripts/install-hermes-skill.py
+```
+
+安装器默认拒绝覆盖已有的不同版本；确认更新来源后使用 `--force`。安装后新 Hermes 会话即可按任务自动匹配 `racing-analyzer` Skill。Skill 只教模型读取确定性证据，不让 Analyzer 生成最终驾驶建议；归因、排序和训练建议由 Hermes 完成。
 
 ## 当前服务器运行
 
@@ -78,7 +91,7 @@ watcher 常驻监听 UDP `33740`，GT7 暂时退出、菜单或无包时不主�
   --sessions 1 5 --segment-m 200
 ```
 
-跨 session 比较输出最佳/最慢 session、圈速差值、相对百分比和固定距离 micro-sector 赢家。当前纽北映射仍为 `uncalibrated`，未校准前只输出距离区间或 `micro-sector-N`，不假称具体弯道名称。
+跨 session 比较输出最佳/最慢 session、圈速差值、相对百分比、重复 session 和固定距离 micro-sector 赢家。`analyze` 输出供 Hermes 使用的确定性证据，不直接输出自然语言建议。当前纽北映射仍为 `uncalibrated`，未校准前只输出距离区间或 `micro-sector-N`，不假称具体弯道名称。
 
 手动导入原始 capture：
 

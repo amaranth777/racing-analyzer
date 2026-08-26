@@ -5,7 +5,7 @@ from gt7coach.cli import main
 from gt7coach.store import SCHEMA
 
 
-def test_analyze_hides_wheel_diagnostics_and_diagnose_caps_them(tmp_path, capsys):
+def test_analyze_keeps_wheel_diagnostics_and_diagnose_caps_them(tmp_path, capsys):
     db = tmp_path / "cli-wheel.sqlite3"
     conn = sqlite3.connect(db); conn.executescript(SCHEMA)
     conn.execute("INSERT INTO sessions VALUES(1, 'sample', 0, 4, 4, 344, 1365, 0)")
@@ -21,8 +21,9 @@ def test_analyze_hides_wheel_diagnostics_and_diagnose_caps_them(tmp_path, capsys
     conn.commit(); conn.close()
     assert main(["--db", str(db), "analyze"]) == 0
     analyzed = json.loads(capsys.readouterr().out)
-    assert "wheel_events" not in analyzed
-    assert "control_metrics" not in analyzed
+    assert len(analyzed["wheel_events"]) <= 10
+    assert "control_metrics" in analyzed
+    assert "recommendations" not in analyzed
     assert main(["--db", str(db), "diagnose"]) == 0
     diagnosed = json.loads(capsys.readouterr().out)
     assert len(diagnosed["wheel_events"]) <= 10

@@ -1,10 +1,13 @@
 """SQLite persistence for decoded GT7 capture frames."""
 from __future__ import annotations
+import hashlib
+import json
 import sqlite3, struct
 from pathlib import Path
 from .analysis import cumulative_distance, summarize_segments
 from .comparison import compare_laps
-from .diagnostics import control_metrics, detect_events, detect_wheel_events, wheel_speeds_kmh
+from .diagnostics import (control_metrics, detect_events, detect_wheel_events,
+                           wheel_speeds_kmh)
 from .laps import extract_lap_boundaries
 from .protocol import PacketError, TelemetryPacket, decode_packet
 from .state import classify_packet_state, coalesce_states
@@ -266,15 +269,41 @@ def session_comparison(db, session_id=None, segment_m=200.0):
     return result
 
 
+def _lap_fingerprint(frames, boundary, car_code):
+    """Hash the complete lap content while ignoring import identity/time origin."""
+    fields = ("packet_id", "lap", "best_lap_ms", "last_lap_ms", "flags",
+              "x", "y", "z", "speed_mps", "rpm", "throttle", "brake",
+              "gear", "suggested_gear", "wheel_rotation", "sway", "heave",
+              "surge")
+    payload = []
+    for index, frame in enumerate(frames):
+        payload.append({
+            "index": index,
+            "offset_ns": int(frame["ts_ns"]) - boundary.start_ts_ns,
+            **{field: frame[field] for field in fields},
+        })
+    raw = json.dumps({
+        "car_code": int(car_code),
+        "lap_time_ms": boundary.lap_time_ms,
+        "frames": payload,
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def compare_sessions(db, session_ids, segment_m=200.0):
-    """Compare the last complete lap from each explicitly selected session."""
+    """Compare the last complete, non-duplicate lap from each session."""
     if len(session_ids) < 2:
         raise ValueError('at least two session IDs are required')
     conn = connect(db)
     lap_rows = {}
     metadata = {}
+    fingerprints = {}
+    duplicate_session_ids = []
     for session_id in session_ids:
-        row = conn.execute('SELECT * FROM sessions WHERE id=?', (int(session_id),)).fetchone()
+        session_id = int(session_id)
+        if session_id in lap_rows or session_id in duplicate_session_ids:
+            continue
+        row = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
         if row is None:
             raise ValueError(f'session {session_id} not found')
         frames = conn.execute(
@@ -284,7 +313,17 @@ def compare_sessions(db, session_ids, segment_m=200.0):
         if not boundaries:
             raise ValueError(f'session {session_id} has no complete positive lap')
         boundary = boundaries[-1]
-        lap_rows[int(session_id)] = [
+        lap_frames = [
+            frame for frame in frames
+            if boundary.start_seq <= frame['seq'] <= boundary.end_seq
+        ]
+        fingerprint = _lap_fingerprint(lap_frames, boundary, row['car_code'])
+        canonical = fingerprints.get(fingerprint)
+        if canonical is not None:
+            duplicate_session_ids.append(session_id)
+            continue
+        fingerprints[fingerprint] = session_id
+        lap_rows[session_id] = [
             {'x': frame['x'], 'y': frame['y'], 'z': frame['z'],
              'ts_ns': frame['ts_ns'], 'speed_mps': frame['speed_mps'],
              'throttle': frame['throttle'], 'brake': frame['brake'],
@@ -292,8 +331,8 @@ def compare_sessions(db, session_ids, segment_m=200.0):
             for frame in frames
             if boundary.start_seq <= frame['seq'] < boundary.end_seq
         ]
-        metadata[int(session_id)] = {
-            'session_id': int(session_id),
+        metadata[session_id] = {
+            'session_id': session_id,
             'lap': boundary.lap,
             'lap_time_s': round(boundary.lap_time_ms / 1000, 3),
             'start_seq': boundary.start_seq,
@@ -318,6 +357,8 @@ def compare_sessions(db, session_ids, segment_m=200.0):
         {**winner, 'session_id': winner.pop('lap')}
         for winner in result['segment_winners']
     ]
+    result['duplicate_session_ids'] = sorted(duplicate_session_ids)
+    result['deduplicated_count'] = len(metadata)
     result.pop('best_lap', None)
     return result
 

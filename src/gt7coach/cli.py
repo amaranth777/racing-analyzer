@@ -120,14 +120,12 @@ def main(argv=None):
             for event in result["events"]:
                 event.update(map_distance(track, event["from_m"], segment_m=args.segment_m))
         if args.command == "analyze":
-            result.pop("events", None)
-            result.pop("control_metrics", None)
-            result.pop("wheel_events", None)
+            result["events"] = result["events"][:10]
+            result["wheel_events"] = result["wheel_events"][:10]
         else:
             result.pop("segments", None)
             result.pop("slowest_segments", None)
             result["wheel_events"] = result["wheel_events"][:10]
-        result.pop("segments", None)
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
     print(json.dumps(session_summary(args.db, args.session), ensure_ascii=False, indent=2))
