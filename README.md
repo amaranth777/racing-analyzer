@@ -108,7 +108,16 @@ watcher 常驻监听 UDP `33740`，GT7 暂时退出、菜单或无包时不主�
 .venv/bin/racing-analyzer --db data/gt7.sqlite3 validate
 # quality 是同一命令的别名；可显式指定 session
 .venv/bin/racing-analyzer --db data/gt7.sqlite3 quality --session 5
+# 显式扫描本地赛道 JSON，并按最新可用完整圈的轨迹距离匹配
+.venv/bin/racing-analyzer --db data/gt7.sqlite3 quality --session 5 \
+  --tracks-dir tracks
 ```
+
+质量结果保留旧字段，并在 Python API `assess_session()` 中为每个完整圈报告
+`lap`、`lap_time_s`、`distance_m`、`usable` 和 `issues`。只有可用完整圈才会进入
+`analyze`/`compare`；无完整圈、解码错误、帧数不足或圈时过短的圈不会被当作证据。
+赛道匹配只使用 `length_m_nominal`，不访问生产目录或外网；无匹配或多个候选接近时
+返回 `unknown`/`ambiguous`，不会猜测。
 
 检查失败时可写入幂等 quarantine manifest；该选项只记录 session 和 issue，不移动或删除 SQLite/capture 源数据：
 

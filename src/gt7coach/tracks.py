@@ -46,3 +46,37 @@ def map_distance(track: dict, distance_m: float, *, segment_m: float = 200.0) ->
                 }
     sector = int(distance // segment_m)
     return {"label": f"micro-sector-{sector:03d}", "named": False}
+
+
+def match_track(track_candidates, distance_m: float, *, tolerance_ratio: float = 0.03) -> dict:
+    """Match a lap distance to nominal track lengths without guessing."""
+    distance = float(distance_m)
+    tolerance = float(tolerance_ratio)
+    if distance < 0 or tolerance < 0:
+        raise ValueError("distance_m and tolerance_ratio must be non-negative")
+    matches = []
+    for track in track_candidates:
+        nominal = track.get("length_m_nominal")
+        if nominal is None or float(nominal) <= 0:
+            continue
+        nominal = float(nominal)
+        error = abs(distance - nominal) / nominal
+        if error <= tolerance:
+            matches.append((error, track, nominal))
+    matches.sort(key=lambda item: item[0])
+    if len(matches) != 1:
+        return {
+            "track_id": None, "display_name": None, "distance_m": distance,
+            "nominal_length_m": None, "relative_error": None,
+            "confidence": "none",
+            "status": "ambiguous" if len(matches) > 1 else "unknown",
+        }
+    error, track, nominal = matches[0]
+    return {
+        "track_id": track.get("track_id"),
+        "display_name": track.get("display_name"),
+        "distance_m": distance, "nominal_length_m": nominal,
+        "relative_error": round(error, 6),
+        "confidence": "high" if error <= tolerance / 2 else "medium",
+        "status": "matched",
+    }

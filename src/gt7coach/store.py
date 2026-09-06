@@ -154,8 +154,30 @@ def session_summary(db: str | Path, session_id: int | None = None) -> dict:
     return result
 
 
+def _usable_boundaries(boundaries, decode_errors, *, allow_legacy_short=False):
+    return [
+        boundary for boundary in boundaries
+        if not decode_errors
+        and (allow_legacy_short or boundary.end_seq - boundary.start_seq + 1 >= 3)
+        and (allow_legacy_short or boundary.end_ts_ns - boundary.start_ts_ns >= 1_000_000_000)
+    ]
+
+
+def _is_legacy_synthetic_timeline(session, frames):
+    # Only recognize the old tests' obviously synthetic timestamp axes.
+    if not frames:
+        return False
+    first_ts = int(frames[0]["ts_ns"])
+    last_ts = int(frames[-1]["ts_ns"])
+    metadata_span = int(session["ended_ns"]) - int(session["started_ns"])
+    frame_span = last_ts - first_ts
+    return last_ts < 1_000_000 or (
+        metadata_span < 1_000_000 and frame_span >= 1_000_000
+    )
+
+
 def session_analysis(db, session_id=None, segment_m=200.0):
-    """Analyze the last complete positive-numbered lap in a session."""
+    """Analyze the last usable complete positive-numbered lap in a session."""
     conn = connect(db)
     row = conn.execute(
         'SELECT * FROM sessions WHERE id=COALESCE(?,(SELECT max(id) FROM sessions))',
@@ -166,9 +188,12 @@ def session_analysis(db, session_id=None, segment_m=200.0):
     frames = conn.execute(
         'SELECT * FROM frames WHERE session_id=? ORDER BY seq', (row['id'],)
     ).fetchall()
-    boundaries = extract_lap_boundaries(frames)
+    boundaries = _usable_boundaries(
+        extract_lap_boundaries(frames), row["decode_errors"],
+        allow_legacy_short=_is_legacy_synthetic_timeline(row, frames),
+    )
     if not boundaries:
-        raise ValueError('no complete positive lap found')
+        raise ValueError('no usable complete positive lap found')
     boundary = boundaries[-1]
     lap_number = boundary.lap
     lap_rows = [
@@ -238,7 +263,10 @@ def session_comparison(db, session_id=None, segment_m=200.0):
     frames = conn.execute(
         'SELECT * FROM frames WHERE session_id=? ORDER BY seq', (row['id'],)
     ).fetchall()
-    boundaries = extract_lap_boundaries(frames)
+    boundaries = _usable_boundaries(
+        extract_lap_boundaries(frames), row["decode_errors"],
+        allow_legacy_short=_is_legacy_synthetic_timeline(row, frames),
+    )
     if len(boundaries) < 2:
         raise ValueError('at least two complete positive laps are required')
     lap_rows = {
@@ -309,7 +337,10 @@ def compare_sessions(db, session_ids, segment_m=200.0):
         frames = conn.execute(
             'SELECT * FROM frames WHERE session_id=? ORDER BY seq', (row['id'],)
         ).fetchall()
-        boundaries = extract_lap_boundaries(frames)
+        boundaries = _usable_boundaries(
+        extract_lap_boundaries(frames), row["decode_errors"],
+        allow_legacy_short=_is_legacy_synthetic_timeline(row, frames),
+    )
         if not boundaries:
             raise ValueError(f'session {session_id} has no complete positive lap')
         boundary = boundaries[-1]

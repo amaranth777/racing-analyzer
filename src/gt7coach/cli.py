@@ -8,7 +8,7 @@ from .capture import capture_and_import, capture_udp, watch_forever, watch_sessi
 from .quality import assess_session
 from .store import (add_setup, compare_sessions, import_capture, list_setups,
                     session_analysis, session_comparison, session_summary)
-from .tracks import load_track, map_distance
+from .tracks import load_track, map_distance, match_track
 
 
 def _write_quarantine_manifest(path: Path, result: dict) -> None:
@@ -32,6 +32,18 @@ def _write_quarantine_manifest(path: Path, result: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n")
     temporary.replace(path)
+
+
+def _load_track_candidates(directory: Path) -> list[dict]:
+    if not directory.is_dir():
+        raise ValueError(f"tracks-dir is not a directory: {directory}")
+    candidates = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            candidates.append(load_track(path))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid track JSON: {path}: {exc}") from exc
+    return candidates
 
 
 def main(argv=None):
@@ -74,6 +86,7 @@ def main(argv=None):
         quality = sub.add_parser(command_name)
         quality.add_argument("--session", type=int)
         quality.add_argument("--quarantine", type=Path)
+        quality.add_argument("--tracks-dir", type=Path)
     setup = sub.add_parser("setup")
     setup_sub = setup.add_subparsers(dest="setup_command", required=True)
     setup_add = setup_sub.add_parser("add")
@@ -145,10 +158,28 @@ def main(argv=None):
             return 2
         if args.quarantine is not None and not result["ok"]:
             _write_quarantine_manifest(args.quarantine, result)
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        output = dict(result)
+        if args.tracks_dir is None:
+            output.pop("laps", None)
+        else:
+            try:
+                candidates = _load_track_candidates(args.tracks_dir)
+                latest = next((lap for lap in reversed(result["laps"]) if lap["usable"]), None)
+                if latest is None:
+                    output["track_match"] = {"track_id": None, "display_name": None, "distance_m": None, "nominal_length_m": None, "relative_error": None, "confidence": "none", "status": "unknown"}
+                else:
+                    output["track_match"] = match_track(candidates, latest["distance_m"])
+            except ValueError as exc:
+                print(json.dumps({"error": str(exc)}, ensure_ascii=False, separators=(",", ":")))
+                return 2
+        print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0 if result["ok"] else 2
     if args.command in {"analyze", "diagnose"}:
-        result = session_analysis(args.db, args.session, args.segment_m)
+        try:
+            result = session_analysis(args.db, args.session, args.segment_m)
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False, separators=(",", ":")))
+            return 2
         result["slowest_segments"] = result["slowest_segments"][:5]
         result["events"] = result["events"][:10]
         if args.track:

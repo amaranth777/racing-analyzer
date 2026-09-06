@@ -131,3 +131,115 @@ def test_validate_is_quality_command_alias(tmp_path, capsys):
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
     assert output["session_id"] == 1
+
+
+from gt7coach.quality import assess_session
+
+
+def test_assess_session_reports_latest_lap_availability_facts(tmp_path):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows()}])
+
+    result = assess_session(db, 1)
+
+    assert result["laps"] == [{
+        "lap": 1,
+        "lap_time_s": 439.208,
+        "distance_m": 50.0,
+        "usable": True,
+        "issues": [],
+    }]
+
+
+
+def test_quality_cli_matches_track_from_tracks_dir(tmp_path, capsys):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows()}])
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    (tracks_dir / "nord.json").write_text(json.dumps({
+        "track_id": "nurburgring_nordschleife",
+        "display_name": "Nürburgring Nordschleife",
+        "length_m_nominal": 50,
+        "mapping_status": "uncalibrated",
+        "named_sections": [],
+    }))
+
+    assert main(["--db", str(db), "quality", "--session", "1",
+                 "--tracks-dir", str(tracks_dir)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["track_match"]["status"] == "matched"
+    assert output["track_match"]["track_id"] == "nurburgring_nordschleife"
+
+
+def test_quality_cli_reports_invalid_tracks_dir(tmp_path, capsys):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows()}])
+
+    assert main(["--db", str(db), "validate", "--tracks-dir",
+                 str(tmp_path / "missing")]) == 2
+
+    output = json.loads(capsys.readouterr().out)
+    assert "tracks-dir" in output["error"]
+
+
+
+def test_match_track_returns_ambiguous_for_multiple_close_candidates():
+    from gt7coach.tracks import match_track
+
+    result = match_track([
+        {"track_id": "a", "display_name": "A", "length_m_nominal": 1000},
+        {"track_id": "b", "display_name": "B", "length_m_nominal": 1020},
+    ], 1010, tolerance_ratio=0.03)
+
+    assert result["status"] == "ambiguous"
+    assert result["track_id"] is None
+
+
+def test_analyze_does_not_use_decode_error_lap(tmp_path, capsys):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows(), "decode_errors": 1}])
+
+    assert main(["--db", str(db), "analyze", "--session", "1"]) == 2
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["error"] == "no usable complete positive lap found"
+
+
+def test_analyze_does_not_use_too_short_lap(tmp_path, capsys):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows(duration_ns=100_000_000)}])
+
+    assert main(["--db", str(db), "analyze", "--session", "1"]) == 2
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["error"] == "no usable complete positive lap found"
+
+
+def test_quality_cli_reports_invalid_track_json(tmp_path, capsys):
+    db = _make_db(tmp_path, [{"id": 1, "rows": _complete_rows()}])
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    (tracks_dir / "broken.json").write_text("{not-json")
+
+    assert main(["--db", str(db), "quality", "--tracks-dir", str(tracks_dir)]) == 2
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["error"].startswith("invalid track JSON:")
+
+
+def test_quality_cli_does_not_match_session_without_complete_lap(tmp_path, capsys):
+    rows = [_row(1, 0, 0, 0, 0), _row(1, 1, 1_000_000_000, 0, 0),
+            _row(1, 2, 1, 2_000_000_000, 100)]
+    db = _make_db(tmp_path, [{"id": 1, "rows": rows}])
+    tracks_dir = tmp_path / "tracks"
+    tracks_dir.mkdir()
+    (tracks_dir / "nord.json").write_text(json.dumps({
+        "track_id": "nurburgring_nordschleife",
+        "display_name": "Nürburgring Nordschleife",
+        "length_m_nominal": 20832,
+        "mapping_status": "uncalibrated",
+        "named_sections": [],
+    }))
+
+    assert main(["--db", str(db), "validate", "--tracks-dir", str(tracks_dir)]) == 2
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["track_match"]["status"] == "unknown"
+    assert output["track_match"]["track_id"] is None
