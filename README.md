@@ -7,14 +7,23 @@ GT7 遥测采集、圈速分析和驾驶诊断工具。项目保留 `gt7` 作为
 ```text
 PS5 192.168.50.246:33739
         ↓ UDP
-当前服务器 192.168.50.20:33740
+生产服务器 192.168.50.20:33740
   watcher / 状态识别 / SQLite / 圈速与赛道分析
-        ↓ SSH + rsync
+  生产运行目录与本地归档（均不离开服务器）
+
 VM102 192.168.50.13
-  开发代码 / 原始 capture 归档 / SQLite 快照 / 离线实验
+  只用于开发、测试和离线实验；不运行生产 watcher
 ```
 
-SQLite 不直接运行在网络共享上。当前服务器本地实时写入，归档服务使用 SQLite 原生 backup 创建一致性快照后再同步到 VM102。原始 capture 不会因分析失败自动删除。
+生产数据只在服务器运行：服务器本地实时写入 SQLite 和 `captures`，归档也由服务器本地脚本完成。归档脚本使用 SQLite 原生 `backup()` 创建一致性快照，再把 captures 复制到服务器本地归档目录；它不通过网络、SSH 或 VM102 写入，也不会删除源数据。VM102 不保存生产运行数据或归档。
+
+服务器上的 systemd（或手动任务）必须显式传入两个本地目录，例如：
+
+```bash
+.venv/bin/python scripts/archive_runtime.py \
+  --runtime-dir /home/amaranth/.local/share/racinganalyzer/data \
+  --archive-dir /home/amaranth/.local/share/racinganalyzer/archive
+```
 
 RacingAnalyzer 只生成确定性的高阶证据：合法圈边界、去重结果、圈速/分段差异、控制指标、事件、轮速诊断和数据质量。它不生成最终驾驶建议；Hermes 读取这些证据后，结合历史圈、车辆/赛道和用户目标，由大模型负责归因、排序和输出训练建议。
 
@@ -54,7 +63,7 @@ gt7-coach-watcher.service
 gt7-coach-archive.timer
 ```
 
-watcher 常驻监听 UDP `33740`，GT7 暂时退出、菜单或无包时不主动结束；异常退出由 systemd 自动重启。归档 timer 将 capture 和一致性 SQLite 快照同步到 VM102 的 `~/archives/gt7-coach`。
+watcher 常驻监听 UDP `33740`，GT7 暂时退出、菜单或无包时不主动结束；异常退出由 systemd 自动重启。归档任务在生产服务器本地执行，把一致性 SQLite 快照写入服务器的 archive 目录，并把 captures 复制到其 `captures/` 子目录；不向 VM102 或其他网络目标写入。
 
 ## CLI
 
@@ -92,6 +101,21 @@ watcher 常驻监听 UDP `33740`，GT7 暂时退出、菜单或无包时不主�
 ```
 
 跨 session 比较输出最佳/最慢 session、圈速差值、相对百分比、重复 session 和固定距离 micro-sector 赢家。`analyze` 输出供 Hermes 使用的确定性证据，不直接输出自然语言建议。当前纽北映射仍为 `uncalibrated`，未校准前只输出距离区间或 `micro-sector-N`，不假称具体弯道名称。
+
+检查最近 session 的数据质量（质量失败返回退出码 2）：
+
+```bash
+.venv/bin/racing-analyzer --db data/gt7.sqlite3 validate
+# quality 是同一命令的别名；可显式指定 session
+.venv/bin/racing-analyzer --db data/gt7.sqlite3 quality --session 5
+```
+
+检查失败时可写入幂等 quarantine manifest；该选项只记录 session 和 issue，不移动或删除 SQLite/capture 源数据：
+
+```bash
+.venv/bin/racing-analyzer --db data/gt7.sqlite3 validate \
+  --session 5 --quarantine data/quarantine.json
+```
 
 手动导入原始 capture：
 
