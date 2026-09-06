@@ -1,4 +1,5 @@
 import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -61,5 +62,15 @@ def test_watch_forever_splits_lap_data_at_menu_and_continues(monkeypatch, tmp_pa
 
     assert not thread.is_alive()
     assert len(imported) == 2
-    assert all(b"M" not in raw for raw in imported)
+    def payloads(raw):
+        offset = 0
+        result = []
+        while offset < len(raw):
+            _, size = struct.unpack_from("<QI", raw, offset)
+            offset += 12
+            result.append(raw[offset:offset + size])
+            offset += size
+        return result
+
+    assert [payload for raw in imported for payload in payloads(raw)] == [b"D", b"D", b"D"]
     assert result_holder["result"]["segments_imported"] == 2
