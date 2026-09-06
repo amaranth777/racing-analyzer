@@ -5,9 +5,33 @@ import json
 from pathlib import Path
 
 from .capture import capture_and_import, capture_udp, watch_forever, watch_sessions
+from .quality import assess_session
 from .store import (add_setup, compare_sessions, import_capture, list_setups,
                     session_analysis, session_comparison, session_summary)
 from .tracks import load_track, map_distance
+
+
+def _write_quarantine_manifest(path: Path, result: dict) -> None:
+    """Atomically mark a failed session without moving or deleting data."""
+    manifest = {"sessions": []}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, dict) and isinstance(loaded.get("sessions"), list):
+            manifest["sessions"] = loaded["sessions"]
+    entry = {"session_id": result["session_id"], "issues": result["issues"]}
+    manifest["sessions"] = [
+        item for item in manifest["sessions"]
+        if not isinstance(item, dict) or item.get("session_id") != entry["session_id"]
+    ]
+    manifest["sessions"].append(entry)
+    manifest["sessions"].sort(key=lambda item: item.get("session_id", 0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 def main(argv=None):
@@ -46,6 +70,10 @@ def main(argv=None):
     diagnose.add_argument("--session", type=int)
     diagnose.add_argument("--segment-m", type=float, default=200.0)
     diagnose.add_argument("--track", type=Path)
+    for command_name in ("validate", "quality"):
+        quality = sub.add_parser(command_name)
+        quality.add_argument("--session", type=int)
+        quality.add_argument("--quarantine", type=Path)
     setup = sub.add_parser("setup")
     setup_sub = setup.add_subparsers(dest="setup_command", required=True)
     setup_add = setup_sub.add_parser("add")
@@ -109,6 +137,16 @@ def main(argv=None):
         result["segment_winners"] = result["segment_winners"][:10]
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
+    if args.command in {"validate", "quality"}:
+        try:
+            result = assess_session(args.db, args.session)
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False, separators=(",", ":")))
+            return 2
+        if args.quarantine is not None and not result["ok"]:
+            _write_quarantine_manifest(args.quarantine, result)
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0 if result["ok"] else 2
     if args.command in {"analyze", "diagnose"}:
         result = session_analysis(args.db, args.session, args.segment_m)
         result["slowest_segments"] = result["slowest_segments"][:5]
