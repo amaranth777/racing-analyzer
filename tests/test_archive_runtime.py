@@ -176,3 +176,65 @@ def test_archive_runtime_skips_unreferenced_active_capture(tmp_path):
     assert result.returncode == 0, result.stderr
     assert (archive / "captures" / "referenced.bin").read_bytes() == b"referenced"
     assert not (archive / "captures" / "active.bin").exists()
+
+
+def test_archive_runtime_skips_unchanged_database_and_captures(tmp_path):
+    runtime = tmp_path / "runtime"
+    archive = tmp_path / "archive"
+    database = make_database(runtime, "before")
+    source_capture = runtime / "captures" / "capture.bin"
+    source_capture.parent.mkdir()
+    source_capture.write_bytes(b"before")
+
+    assert run_archive(runtime, archive).returncode == 0
+    archived_db = archive / "gt7.sqlite3"
+    archived_capture = archive / "captures" / "capture.bin"
+    first = (archived_db.stat().st_ino, archived_capture.stat().st_ino)
+
+    assert run_archive(runtime, archive).returncode == 0
+    assert (archived_db.stat().st_ino, archived_capture.stat().st_ino) == first
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO sessions(name) VALUES ('after')")
+    source_capture.write_bytes(b"after!")
+    assert run_archive(runtime, archive).returncode == 0
+
+    assert archived_db.stat().st_ino != first[0]
+    assert archived_capture.read_bytes() == b"after!"
+    with sqlite3.connect(archived_db) as connection:
+        assert connection.execute("SELECT name FROM sessions ORDER BY rowid").fetchall() == [("before",), ("after",)]
+
+
+def test_archive_runtime_rearchives_write_made_during_backup(tmp_path, monkeypatch):
+    import importlib.util
+    import os
+
+    spec = importlib.util.spec_from_file_location("archive_runtime", SCRIPT)
+    archive_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(archive_module)
+
+    runtime = tmp_path / "runtime"
+    archive = tmp_path / "archive"
+    database = make_database(runtime, "before")
+    original_signature = archive_module._database_signature
+    calls = 0
+
+    def signature_then_write(source):
+        nonlocal calls
+        calls += 1
+        value = original_signature(source)
+        if calls == 1:  # a write lands after the signature was taken
+            with sqlite3.connect(database) as connection:
+                connection.execute("INSERT INTO sessions(name) VALUES ('during')")
+            os.utime(database, ns=(value + 1_000_000, value + 1_000_000))
+        return value
+
+    monkeypatch.setattr(archive_module, "_database_signature", signature_then_write)
+    destination = archive / "gt7.sqlite3"
+    assert archive_module._backup_database(database, destination) is True
+    # The stamp is the pre-write signature, so the next run must not skip.
+    assert archive_module._backup_database(database, destination) is True
+    assert archive_module._backup_database(database, destination) is False
+
+    with sqlite3.connect(archive / "gt7.sqlite3") as connection:
+        assert connection.execute("SELECT name FROM sessions ORDER BY rowid").fetchall() == [("before",), ("during",)]

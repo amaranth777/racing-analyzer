@@ -29,7 +29,22 @@ def _validate_dirs(runtime_dir: Path, archive_dir: Path) -> None:
         raise ValueError("archive directory must not be the runtime directory or its child")
 
 
-def _backup_database(source: Path, destination: Path) -> None:
+def _database_signature(source: Path) -> int:
+    """Newest mtime of the database and its WAL; changes whenever SQLite writes."""
+    wal = source.with_name(source.name + "-wal")
+    return max(path.stat().st_mtime_ns for path in (source, wal) if path.exists())
+
+
+def _backup_database(source: Path, destination: Path) -> bool:
+    """Snapshot source into destination unless it is unchanged; return True if written.
+
+    The snapshot is stamped with the source signature taken *before* the backup, so a
+    write that lands during the backup still differs from the stamp and is picked up
+    by the next run.
+    """
+    signature = _database_signature(source)
+    if destination.is_file() and destination.stat().st_mtime_ns == signature:
+        return False
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
@@ -40,15 +55,22 @@ def _backup_database(source: Path, destination: Path) -> None:
         with sqlite3.connect(source) as source_connection, sqlite3.connect(temporary) as destination_connection:
             source_connection.backup(destination_connection)
             destination_connection.commit()
+        os.utime(temporary, ns=(signature, signature))
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+    return True
 
 
 CAPTURE_COPY_ATTEMPTS = 3
 
 
 def _copy_capture_consistently(source: Path, destination: Path) -> None:
+    if destination.is_file():
+        source_stat, destination_stat = source.stat(), destination.stat()
+        # copy2 preserves mtime, so equal size + mtime means this capture is already archived.
+        if (source_stat.st_size, source_stat.st_mtime_ns) == (destination_stat.st_size, destination_stat.st_mtime_ns):
+            return
     destination.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(CAPTURE_COPY_ATTEMPTS):
         before = source.stat()
